@@ -1,0 +1,160 @@
+# pi-deepswe
+
+Run stock [pi](https://github.com/earendil-works/pi) on the official
+[DeepSWE](https://github.com/datacurve-ai/deep-swe) tasks, using
+[Pier](https://github.com/datacurve-ai/pier) for Docker execution and grading.
+
+Each attempt runs pi inside the task container. The adapter commits pi's changes,
+Pier collects the resulting patch, stops the agent container, and grades it in a
+fresh container without network access. Held-out tests and reference solutions
+are not mounted into the agent container.
+
+## Setup
+
+Requires Linux, Python 3.10+ for bootstrap, Git, and a running Docker daemon with
+Docker Compose. Bootstrap installs uv 0.12.23 and Python 3.12.15 inside this
+workspace; the host's Python and Node installations are left alone.
+
+```sh
+python3 scripts/bootstrap.py
+.venv/bin/pi-deepswe fetch
+cp configs/config.example.toml config.local.toml
+```
+
+`fetch` checks out DeepSWE revision
+`0b9fabbb63b9104d678fe965e1632f2dd9eaa2ea` (113 tasks) in `datasets/deep-swe`.
+It refuses to replace an existing directory. The checkout, jobs, caches, and
+local configuration are ignored by Git.
+
+Edit `config.local.toml` to provide your model's `base_url` and `model_id`. The
+server must support streaming OpenAI-compatible Chat Completions with tool
+calling. This project connects to an existing server; it does not provision one.
+If authentication is required, set `api_key_env` to the name of an exported
+variable. For example, `api_key_env = "MODEL_API_KEY"`; keep its value out of TOML.
+Omit this setting for a server that accepts an unused dummy key.
+
+Match `context_window` and `max_tokens` to your server's actual limits. Defaults
+are 32768 and 4096. For reasoning models, set `reasoning = true` and select the
+supported `thinking` level. Optional sampling, compatibility, and USD-per-million
+prices are illustrated in the example configuration. Compatibility settings must
+match your server. With no configured prices, reported dollar cost is unknown.
+
+### Local model connectivity
+
+Host `localhost` and IPv4 loopback addresses become `host.docker.internal` for
+container inference. The proxy container maps that name to Docker's host gateway.
+Your model server must listen on an interface reachable from Docker, such as the
+host's Docker bridge address or `0.0.0.0`, rather than only `127.0.0.1`. Remote
+IPv4 addresses and DNS hostnames also work; IPv6 endpoints are not supported in v1.
+
+Only the model hostname and its configured TCP port are permitted by the
+inference proxy. Custom ports such as 8000, 11434, and HTTPS 8443 are supported.
+Do not use `--network host` or enable unrestricted task networking. The verifier
+receives neither inference credentials nor an inference proxy.
+
+## Run
+
+Start with the default single task:
+
+```sh
+.venv/bin/pi-deepswe check --config config.local.toml
+.venv/bin/pi-deepswe run --config config.local.toml --task abs-module-cache-flags
+```
+
+`check` validates configuration, Docker Compose, and host resources. Endpoint
+connectivity is checked through the actual inference proxy during trial setup;
+`check` itself does not make an inference request.
+
+All paths in TOML resolve from your current working directory. Each run gets a
+new job directory, one attempt per task, no whole-trial retries, and the task's
+original timeouts and CPU/memory limits. Concurrency defaults to one. The default
+agent budget for `abs-module-cache-flags` is three hours, and the verifier budget
+is 30 minutes. pi retains its normal API retry and compaction behavior.
+
+For a deterministic subset or the whole corpus:
+
+```sh
+.venv/bin/pi-deepswe run --config config.local.toml --n-tasks 10 --seed 0
+.venv/bin/pi-deepswe run --config config.local.toml --all
+```
+
+The subset shuffles sorted task-folder names using the provided seed. Record the
+selected task IDs with any results; this selection need not match Pier's native
+subset ordering. Run one task at a time on small hosts. The launcher requires the
+largest selected container's memory limit per concurrent trial plus 1 GiB host
+reserve, and at least 10 GiB free space on Docker's filesystem. Image sizes vary,
+so that disk minimum does not guarantee a particular image will fit. Limits are
+never reduced automatically. Images/build caches can accumulate over a full run.
+
+The stock configuration uses pi's default system prompt and four coding tools:
+`read`, `bash`, `edit`, and `write`. Skills, extensions, MCP, prompt templates,
+automatic updates, and trust-gated project configuration are disabled. Ordinary
+repository context files are retained. No host pi configuration is mounted.
+Changes are staged and committed during bounded finalization, including after a
+timeout. Existing commits are preserved; finalization does not create an empty
+commit. Ignored files are not added.
+
+### Inspect results
+
+```sh
+.venv/bin/pi-deepswe summary jobs/<job-name>
+.venv/bin/pier view jobs
+```
+
+Pier's native job and trial results remain the source of truth. Useful artifacts:
+
+- `pi-deepswe-provenance.json`: versions, benchmark revision, model settings, task
+  selection, run budgets, and host resource checks.
+- `<trial>/agent/`: `events.jsonl`, native sessions, `stderr.txt`, ATIF
+  `trajectory.json`, `submission.txt`, and adapter provenance.
+- `<trial>/artifacts/model.patch`: the submitted committed patch.
+- `<trial>/verifier/`: `reward.json`, test reports, and verifier output.
+
+A verifier-produced zero reward is a completed unsuccessful attempt; missing
+verifier output is reported separately from scores. The launcher exits 0 for a
+verified run without infrastructure errors, 1 for failed/incomplete execution,
+and 2 for configuration or preflight errors. Timeouts preserve partial logs and
+patches, retain an infrastructure error, and allow Pier to grade the partial work.
+
+The trajectory converter counts authoritative completed messages once, connects
+tool calls to their results, preserves reasoning, and includes reported
+compaction usage. Missing usage remains unknown. Raw JSON and session logs remain
+available when a process ends with a truncated event. These logs can contain
+repository content and model output; review them before sharing.
+
+Label measured results **pi + your model on DeepSWE**. They measure this agent
+configuration and are not directly equivalent to the reference mini-swe-agent
+leaderboard runs. The integration milestone is valid patch collection, saved
+logs, and verifier output; the selected model need not solve the task.
+
+## Development and verification
+
+Host Python packages are locked in `uv.lock`. Container inference uses pi 1.1.0,
+Node 22.19.0 with verified archive checksums, and `npm ci --ignore-scripts` against
+the bundled npm lock. The adapter and Docker environment load through Pier's
+custom import interfaces; no Pier fork is needed.
+
+```sh
+.venv/bin/ruff check src tests scripts
+.venv/bin/ruff format --check src tests scripts
+.venv/bin/pytest -q
+PI_DEEPSWE_DOCKER_TESTS=1 .venv/bin/pytest tests/test_docker.py -q
+```
+
+Docker tests use a deterministic local mock SSE server and a small repository.
+They make no external model calls. They verify tracked/untracked patch transfer,
+model authentication, inference-only networking, held-out test isolation,
+separate verifier grading, token accounting, timeout recovery, and cleanup.
+Normal test runs skip these Docker tests. Builds download Ubuntu/system packages,
+Node, and the locked npm packages.
+
+## Cleanup
+
+Pier stops trial containers and networks after completion, keeping logs and the
+image layers needed for repeat runs. If a process is forcibly killed, use the
+trial's generated Compose files and recorded project name to run `docker compose
+... down`; inspect those files rather than deleting unrelated containers.
+
+Remove selected job folders or this workspace's `.cache` when no run is active.
+Inspect `docker system df` before removing unused images or build cache; avoid
+broad Docker pruning when the machine also hosts other workloads.

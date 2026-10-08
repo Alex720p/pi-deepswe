@@ -1,0 +1,46 @@
+# Workspace-local runtimes and downloaded dependencies
+/.venv/
+/.tools/
+node_modules/
+
+# Downloaded benchmark tasks and generated evaluation output
+/datasets/
+/jobs/
+/results/
+
+# Local model settings and environment secrets (keep example files)
+/config.local.toml
+/configs/*.local.toml
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Python bytecode and packaging artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+/build/
+/dist/
+
+# Tool caches, test reports, and coverage output
+/.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+/htmlcov/
+/coverage.xml
+*.log
+
+# Editor temporary files and operating-system metadata
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
