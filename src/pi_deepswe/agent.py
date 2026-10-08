@@ -25,6 +25,13 @@ NODE = f"{RUNTIME}/node/bin/node"
 CLI = f"{RUNTIME}/runtime/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
 LOGS = "/logs/agent"
 CONFIG_DIR = "/installed-agent/pi-deepswe"
+VPN_PROBE_INTERVAL = 30
+VPN_PROBE_FAILURES = 3
+
+
+class InferenceUnavailableError(NonZeroAgentExitCodeError):
+    """Inference access failed; preserve this attempt and stop the job."""
+
 
 # A separate process group lets timeout cleanup stop pi and its shell-tool children
 # before taking the commit snapshot. Never kill PID 1 or an unvalidated PID.
@@ -232,7 +239,46 @@ class PiAgent(BaseInstalledAgent):
         # Do not log the environment dictionary, which contains provider secrets.
         result = await environment.exec(command=probe, env=env, timeout_sec=25)
         if result.return_code != 0:
-            raise RuntimeError(f"Endpoint preflight failed: {result.stderr or result.stdout}")
+            raise InferenceUnavailableError(
+                f"Endpoint preflight failed: {result.stderr or result.stdout}"
+            )
+
+    async def execute_with_connection_watch(self, environment: BaseEnvironment):
+        env = environment.agent_process_env(self.runtime_env())
+        process = asyncio.create_task(
+            environment.exec(command=self.command(), cwd=self.repo_dir, env=env)
+        )
+
+        async def watch():
+            failures = 0
+            while True:
+                await asyncio.sleep(VPN_PROBE_INTERVAL)
+                probe = endpoint_probe_command(
+                    self.model_config.effective_url, f"{CONFIG_DIR}/watch-headers"
+                )
+                try:
+                    result = await environment.exec(command=probe, env=env, timeout_sec=25)
+                    unreachable = result.return_code != 0
+                except Exception:
+                    unreachable = True
+                failures = failures + 1 if unreachable else 0
+                if failures >= VPN_PROBE_FAILURES:
+                    raise InferenceUnavailableError(
+                        "Inference endpoint became unreachable in three consecutive probes; "
+                        "reconnect the VPN and resume the job."
+                    )
+
+        watcher = asyncio.create_task(watch())
+        try:
+            done, _ = await asyncio.wait({process, watcher}, return_when=asyncio.FIRST_COMPLETED)
+            if process in done:
+                return process.result()
+            watcher.result()
+        finally:
+            for task in (process, watcher):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(process, watcher, return_exceptions=True)
 
     def command(self) -> str:
         args = [
@@ -291,18 +337,8 @@ class PiAgent(BaseInstalledAgent):
             raise RuntimeError("Could not write the task instruction")
         error: BaseException | None = None
         try:
-            result = await environment.exec(
-                command=self.command(),
-                cwd=self.repo_dir,
-                env=environment.agent_process_env(self.runtime_env()),
-            )
-            if result.return_code != 0:
-                raise NonZeroAgentExitCodeError(
-                    f"pi exited with status {result.return_code}; see agent/stderr.txt"
-                )
+            result = await self.execute_with_connection_watch(environment)
             events, _ = read_events(self.logs_dir / "events.jsonl")
-            if not any(e.get("type") == "agent_settled" for e in events):
-                raise NonZeroAgentExitCodeError("pi did not emit agent_settled; see agent logs")
             failures = [
                 e
                 for e in events
@@ -318,9 +354,15 @@ class PiAgent(BaseInstalledAgent):
                 and e.get("message", {}).get("role") == "assistant"
             ]
             if failures and assistants[-1].get("stopReason") in {"error", "aborted"}:
-                raise NonZeroAgentExitCodeError(
+                raise InferenceUnavailableError(
                     "pi ended with a model error; see agent/events.jsonl"
                 )
+            if result.return_code != 0:
+                raise NonZeroAgentExitCodeError(
+                    f"pi exited with status {result.return_code}; see agent/stderr.txt"
+                )
+            if not any(e.get("type") == "agent_settled" for e in events):
+                raise NonZeroAgentExitCodeError("pi did not emit agent_settled; see agent logs")
         except BaseException as exc:
             error = exc
             raise

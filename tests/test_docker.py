@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -8,8 +9,9 @@ from pier.job import Job
 from pier.models.trial.result import TrialResult
 
 from pi_deepswe import cleanup
-from pi_deepswe.cli import build_job_config
+from pi_deepswe.cli import build_job_config, resume
 from pi_deepswe.config import Config, ModelConfig, RunConfig
+from pi_deepswe.recovery import run_job
 
 from .mock_server import mock_model
 
@@ -122,3 +124,61 @@ async def test_timeout_preserves_partial_patch(tmp_path):
         assert (trial / "agent/trajectory.json").exists()
         assert (trial / "verifier/reward.json").exists()
         assert len(requests) >= 2
+
+
+@pytest.mark.asyncio
+async def test_vpn_loss_stops_and_resume_skips_completed_tasks(tmp_path, monkeypatch):
+    require_docker()
+    import pi_deepswe.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "VPN_PROBE_INTERVAL", 0.1)
+    real_docker_command = cleanup.docker_command
+
+    async def test_docker_command(*args):
+        if args[:2] == ("builder", "prune"):
+            return 0, "builder prune mocked in integration test"
+        return await real_docker_command(*args)
+
+    monkeypatch.setattr(cleanup, "docker_command", test_docker_command)
+    tasks = []
+    for name in ["first", "second", "third"]:
+        path = tmp_path / "tasks" / name
+        shutil.copytree(FIXTURE, path)
+        tasks.append(path)
+    connection = {}
+    with mock_model(connection_state=connection) as (port, requests):
+        config = Config(
+            model=ModelConfig(base_url=f"http://localhost:{port}/v1", model_id="mock/model"),
+            run=RunConfig(jobs_dir=tmp_path / "jobs", prune_docker_cache=True),
+        )
+        job = await Job.create(build_job_config(config, tasks, "pi-vpn-resume"))
+
+        async def disconnect_after_first_task(event):
+            if event.result.exception_info is None:
+                connection["disconnect_after_write"] = True
+
+        job.on_trial_ended(disconnect_after_first_task)
+        assert await run_job(job, prune=True) == 75
+        results = list(job.job_dir.glob("*/result.json"))
+        assert len(results) == 2
+        completed = next(p for p in results if json.loads(p.read_text())["exception_info"] is None)
+        previous_result = completed.read_bytes()
+        interrupted = next(p for p in results if p != completed)
+        assert json.loads(interrupted.read_text())["exception_info"]["exception_type"] == (
+            "InferenceUnavailableError"
+        )
+        assert "solved" in (interrupted.parent / "artifacts/model.patch").read_text()
+        assert (interrupted.parent / "agent/trajectory.json").exists()
+        connection.update(offline=False, disconnect_after_write=False)
+        requests.clear()
+        assert await resume(job.job_dir) == 0
+        assert completed.read_bytes() == previous_result
+        resumed = list(job.job_dir.glob("*/result.json"))
+        assert len(resumed) == 3
+        assert all(json.loads(path.read_text())["exception_info"] is None for path in resumed)
+        assert len(requests) == 8  # Two remaining tasks; the completed task is skipped.
+        assert list((job.job_dir / ".interrupted").glob("*/artifacts/model.patch"))
+        assert all((path.parent / "docker-cleanup.json").exists() for path in resumed)
+        running = subprocess.check_output(["docker", "ps", "--format", "{{.Names}}"], text=True)
+        for path in resumed:
+            assert path.parent.name.lower() not in running

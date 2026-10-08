@@ -153,7 +153,7 @@ async def test_provenance_omits_resources_preserves_pruning(tmp_path, monkeypatc
 
     from .test_docker import FIXTURE
 
-    job = SimpleNamespace(job_dir=tmp_path, run=AsyncMock(), on_trial_ended=Mock())
+    job = SimpleNamespace(job_dir=tmp_path, run=AsyncMock(), on_trial_ended=Mock(), add_hook=Mock())
     create_job = AsyncMock(return_value=job)
     monkeypatch.setattr(Job, "create", create_job)
     monkeypatch.setattr(cli, "dataset_revision", lambda _path: "fixture-revision")
@@ -169,5 +169,5 @@ async def test_provenance_omits_resources_preserves_pruning(tmp_path, monkeypatc
     assert "resources" not in provenance
     assert provenance["prune_docker_cache"] is True
     assert provenance["budgets"] == "task defaults"
-    job.on_trial_ended.assert_called_once_with(cli.prune_trial_docker_cache)
+    job.on_trial_ended.assert_called_once()
     job.run.assert_awaited_once()

@@ -18,10 +18,10 @@ from pier.models.task.verifier_mode import resolve_effective_verifier_env_config
 from pier.models.trial.config import AgentConfig, EnvironmentConfig, TaskConfig
 
 from pi_deepswe import __version__
-from pi_deepswe.cleanup import prune_trial_docker_cache
-from pi_deepswe.config import Config, RunConfig
+from pi_deepswe.config import Config, ModelConfig, RunConfig
 from pi_deepswe.environment import PiDockerEnvironment
 from pi_deepswe.pins import DEEPSWE_COMMIT, NODE_VERSION, PI_VERSION, PIER_VERSION
+from pi_deepswe.recovery import archive_unfinished_trials, job_lock, run_job
 
 
 def fetch_dataset(destination: Path) -> None:
@@ -166,8 +166,6 @@ async def launch(config: Config, paths: list[Path]) -> int:
 
     job_name = datetime.now(UTC).strftime("pi-%Y%m%d-%H%M%S-") + uuid4().hex[:6]
     job = await Job.create(build_job_config(config, paths, job_name))
-    if config.run.prune_docker_cache:
-        job.on_trial_ended(prune_trial_docker_cache)
     revision = dataset_revision(config.run.tasks_dir)
     (job.job_dir / "pi-deepswe-provenance.json").write_text(
         json.dumps(
@@ -192,10 +190,44 @@ async def launch(config: Config, paths: list[Path]) -> int:
         )
         + "\n"
     )
-    await job.run()
+    with job_lock(job.job_dir):
+        status = await run_job(job, prune=config.run.prune_docker_cache)
     summary = summarize(job.job_dir)
     print(json.dumps(summary, indent=2))
-    return 1 if summary["infrastructure_errors"] or not summary["verified_trials"] else 0
+    return status or (
+        1 if summary["infrastructure_errors"] or not summary["verified_trials"] else 0
+    )
+
+
+async def resume(job_dir: Path) -> int:
+    from pier.job import Job
+
+    job_dir = job_dir.resolve()
+    saved = JobConfig.model_validate_json((job_dir / "config.json").read_text())
+    if (saved.jobs_dir / saved.job_name).resolve() != job_dir:
+        raise ValueError("Resume from the original job directory; saved paths must still exist")
+    if len(saved.agents) != 1 or saved.agents[0].import_path != "pi_deepswe.agent:PiAgent":
+        raise ValueError("Only jobs created by pi-deepswe can be resumed")
+    if saved.environment.import_path != "pi_deepswe.environment:PiDockerEnvironment":
+        raise ValueError("The saved job does not use the pi-deepswe environment")
+    model = ModelConfig.model_validate(saved.agents[0].kwargs["model_config"])
+    pruning = saved.environment.kwargs.get("prune_docker_cache", False)
+    config = Config(
+        model=model,
+        run=RunConfig(concurrency=saved.n_concurrent_trials, prune_docker_cache=pruning),
+    )
+    paths = [task.get_local_path() for task in saved.tasks]
+    check_prerequisites(config, paths)
+    with job_lock(job_dir):
+        archived = archive_unfinished_trials(job_dir)
+        print(f"Resuming {job_dir}; archived {len(archived)} unfinished attempts.")
+        job = await Job.create(saved)
+        status = await run_job(job, prune=pruning)
+    summary = summarize(job_dir)
+    print(json.dumps(summary, indent=2))
+    return status or (
+        1 if summary["infrastructure_errors"] or not summary["verified_trials"] else 0
+    )
 
 
 def parser() -> argparse.ArgumentParser:
@@ -221,6 +253,10 @@ def parser() -> argparse.ArgumentParser:
         )
     summary = commands.add_parser("summary", help="Inspect saved verifier rewards and errors")
     summary.add_argument("job_dir", type=Path)
+    restart = commands.add_parser(
+        "resume", help="Resume unfinished tasks using the saved job settings"
+    )
+    restart.add_argument("job_dir", type=Path)
     return result
 
 
@@ -233,6 +269,8 @@ def main() -> None:
         if args.command == "summary":
             print(json.dumps(summarize(args.job_dir), indent=2))
             return
+        if args.command == "resume":
+            sys.exit(asyncio.run(resume(args.job_dir)))
         config = Config.load(args.config)
         if args.prune_docker_cache:
             config.run = RunConfig.model_validate(

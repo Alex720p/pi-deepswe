@@ -85,6 +85,30 @@ selected task IDs with any results; this selection need not match Pier's native
 subset ordering. The benchmark's task limits are retained. Images/build caches
 can accumulate over a full run; automatic cleanup is available below.
 
+### VPN interruptions and resuming
+
+The agent checks inference connectivity through its Docker proxy every 30 seconds.
+Three consecutive failed probes stop the active agent, save its partial patch and
+logs, and allow offline grading to finish. A failed endpoint preflight or a
+terminal model API error also stops the job before further tasks run. Recoverable
+API retries stay within pi. A VPN-related stop exits with code 75 and prints the
+job path and resume command. For VPN-limited runs, keep `concurrency = 1`.
+
+After reconnecting the VPN, export the model API key again and resume:
+
+```sh
+.venv/bin/pi-deepswe resume jobs/<job-name>
+```
+
+Resume uses the saved task selection, model configuration, budgets, and Docker
+pruning setting. It retains completed scored attempts, including zero scores and
+graded agent timeouts. Interrupted attempts and infrastructure failures restart
+from scratch; their earlier logs and patches are moved into the job's `.interrupted/`
+directory. Unstarted tasks run normally. Resumption continues the same job and
+keeps its original provenance. Use the same workspace/task paths and do not run
+two launchers against the same job. `run-state.json` records whether a run paused,
+stopped, or finished. Ordinary SSH disconnects can be handled by running in `tmux`.
+
 The stock configuration uses pi's default system prompt and four coding tools:
 `read`, `bash`, `edit`, and `write`. Skills, extensions, MCP, prompt templates,
 automatic updates, and trust-gated project configuration are disabled. Ordinary
@@ -112,8 +136,9 @@ Pier's native job and trial results remain the source of truth. Useful artifacts
 A verifier-produced zero reward is a completed unsuccessful attempt; missing
 verifier output is reported separately from scores. The launcher exits 0 for a
 verified run without infrastructure errors, 1 for failed/incomplete execution,
-and 2 for configuration or preflight errors. Timeouts preserve partial logs and
-patches, retain an infrastructure error, and allow Pier to grade the partial work.
+2 for configuration or preflight errors, and 75 for an inference-related pause.
+Timeouts preserve partial logs and patches, retain an infrastructure error, and
+allow Pier to grade the partial work.
 
 The trajectory converter counts authoritative completed messages once, connects
 tool calls to their results, preserves reasoning, and includes reported

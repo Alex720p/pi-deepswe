@@ -7,7 +7,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 @contextmanager
-def mock_model(*, hang_after_write=False, models_status=200, squid_error=False):
+def mock_model(
+    *, hang_after_write=False, models_status=200, squid_error=False, connection_state=None
+):
     requests = []
     release = threading.Event()
 
@@ -17,7 +19,8 @@ def mock_model(*, hang_after_write=False, models_status=200, squid_error=False):
 
         def do_GET(self):
             data = json.dumps({"object": "list", "data": [{"id": "mock/model"}]}).encode()
-            self.send_response(models_status)
+            offline = connection_state is not None and connection_state.get("offline", False)
+            self.send_response(503 if offline else models_status)
             if squid_error:
                 self.send_header("X-Squid-Error", "ERR_ACCESS_DENIED 0")
             self.send_header("Content-Type", "application/json")
@@ -29,9 +32,12 @@ def mock_model(*, hang_after_write=False, models_status=200, squid_error=False):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append({"body": body, "authorization": self.headers.get("Authorization")})
             turn = len(requests)
-            if hang_after_write and turn > 1:
+            offline = connection_state is not None and connection_state.get("offline", False)
+            if offline or (hang_after_write and turn > 1):
                 release.wait(90)
                 return
+            if connection_state is not None:
+                turn = (turn - 1) % 4 + 1
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -96,6 +102,9 @@ def mock_model(*, hang_after_write=False, models_status=200, squid_error=False):
             event(finish="tool_calls")
             event(usage={"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14})
             self.wfile.write(b"data: [DONE]\n\n")
+            if turn == 1 and connection_state is not None:
+                if connection_state.get("disconnect_after_write", False):
+                    connection_state["offline"] = True
 
     server = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
     server.daemon_threads = True
