@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling==1.30.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pi-deepswe"
+version = "0.1.0"
+description = "Stock pi coding agent adapter for DeepSWE through Pier"
+requires-python = ">=3.12"
+dependencies = ["datacurve-pier==0.3.1"]
+
+[project.scripts]
+pi-deepswe = "pi_deepswe.cli:main"
+
+[dependency-groups]
+dev = ["pytest==9.0.3", "pytest-asyncio==1.4.0", "ruff==0.15.20"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pi_deepswe"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["docker: integration tests that launch Docker containers"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,28 @@
+# All filesystem paths are relative to the directory you launch the command from.
+[model]
+base_url = "http://localhost:8000/v1"
+model_id = "REPLACE_WITH_YOUR_MODEL_ID"
+# api_key_env = "MODEL_API_KEY"  # Name only; export its value in your shell.
+context_window = 32768
+max_tokens = 4096
+reasoning = false
+thinking = "off"
+
+# Optional server-specific sampling and verified compatibility settings:
+# [model.sampling]
+# temperature = 0.6
+# top_p = 0.95
+# [model.compat]
+# supportsReasoningEffort = false
+
+# Optional prices in USD per million tokens; absent prices mean unknown cost.
+# [model.prices]
+# input = 0.0
+# output = 0.0
+# cacheRead = 0.0
+# cacheWrite = 0.0
+
+[run]
+tasks_dir = "datasets/deep-swe/tasks"
+jobs_dir = "jobs"
+concurrency = 1

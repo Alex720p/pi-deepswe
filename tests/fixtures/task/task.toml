@@ -1,0 +1,23 @@
+schema_version = "1.3"
+artifacts = ["/logs/artifacts/model.patch"]
+[task]
+name = "pi-deepswe/mock"
+[agent]
+network_mode = "no-network"
+timeout_sec = 60
+[environment]
+os = "linux"
+cpus = 1
+memory_mb = 1024
+storage_mb = 1024
+[verifier]
+environment_mode = "separate"
+network_mode = "no-network"
+timeout_sec = 60
+[verifier.environment]
+os = "linux"
+cpus = 1
+memory_mb = 512
+storage_mb = 1024
+[[verifier.collect]]
+command = "cd /app && mkdir -p /logs/artifacts && git -c safe.directory='*' diff --binary $(git -c safe.directory='*' rev-list --max-parents=0 HEAD) HEAD > /logs/artifacts/model.patch"
