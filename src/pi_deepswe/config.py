@@ -49,6 +49,9 @@ class ModelConfig(BaseModel):
     max_tokens: int = Field(default=4096, ge=1)
     reasoning: bool = False
     thinking: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] = "off"
+    thinking_level_map: dict[
+        Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"], str | None
+    ] = Field(default_factory=dict)
     sampling: dict[str, Any] = Field(default_factory=dict)
     compat: dict[str, Any] = Field(default_factory=dict)
     prices: Prices | None = None
@@ -98,6 +101,8 @@ class ModelConfig(BaseModel):
             "contextWindow": self.context_window,
             "maxTokens": self.max_tokens,
         }
+        if self.thinking_level_map:
+            model["thinkingLevelMap"] = self.thinking_level_map
         if self.sampling:
             model["samplingParams"] = self.sampling
         if self.compat:

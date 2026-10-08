@@ -35,7 +35,9 @@ Omit this setting for a server that accepts an unused dummy key.
 
 Match `context_window` and `max_tokens` to your server's actual limits. Defaults
 are 32768 and 4096. For reasoning models, set `reasoning = true` and select the
-supported `thinking` level. Optional sampling, compatibility, and USD-per-million
+supported `thinking` level. Models with `xhigh` or `max` levels also need an
+explicit mapping, for example `[model.thinking_level_map]` with `max = "max"`.
+Optional sampling, compatibility, and USD-per-million
 prices are illustrated in the example configuration. Compatibility settings must
 match your server. With no configured prices, reported dollar cost is unknown.
 
