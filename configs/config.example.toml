@@ -26,3 +26,6 @@ thinking = "off"
 tasks_dir = "datasets/deep-swe/tasks"
 jobs_dir = "jobs"
 concurrency = 1
+# Optional: remove each finished trial's unused images and prune builder-wide
+# unused build cache. Requires concurrency=1; other projects may rebuild later.
+prune_docker_cache = false

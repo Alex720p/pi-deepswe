@@ -7,6 +7,7 @@ import pytest
 from pier.job import Job
 from pier.models.trial.result import TrialResult
 
+from pi_deepswe import cleanup
 from pi_deepswe.cli import build_job_config
 from pi_deepswe.config import Config, ModelConfig, RunConfig
 
@@ -24,6 +25,18 @@ def require_docker():
 @pytest.mark.asyncio
 async def test_full_pipeline(tmp_path, monkeypatch):
     require_docker()
+    # Exercise real trial-image removal while preserving the host builder's
+    # unrelated cache during tests. The prune command itself is unit-tested.
+    real_docker_command = cleanup.docker_command
+    prune_calls = []
+
+    async def test_docker_command(*args):
+        if args[:2] == ("builder", "prune"):
+            prune_calls.append(args)
+            return 0, "builder prune mocked in integration test"
+        return await real_docker_command(*args)
+
+    monkeypatch.setattr(cleanup, "docker_command", test_docker_command)
     monkeypatch.setenv("MOCK_API_KEY", "fixture-secret-not-for-provenance")
     with mock_model() as (port, requests):
         config = Config(
@@ -32,9 +45,20 @@ async def test_full_pipeline(tmp_path, monkeypatch):
                 model_id="mock/model",
                 api_key_env="MOCK_API_KEY",
             ),
-            run=RunConfig(jobs_dir=tmp_path / "jobs"),
+            run=RunConfig(jobs_dir=tmp_path / "jobs", prune_docker_cache=True),
         )
         job = await Job.create(build_job_config(config, [FIXTURE], "pi-docker-smoke"))
+        hook_trials = []
+
+        async def after_grading(event):
+            trial = event.config.trials_dir / event.config.trial_name
+            assert (trial / "result.json").exists()
+            assert (trial / "verifier/reward.json").exists()
+            assert (trial / "artifacts/model.patch").exists()
+            await cleanup.prune_trial_docker_cache(event)
+            hook_trials.append(event.trial_id)
+
+        job.on_trial_ended(after_grading)
         await job.run()
         results = list(job.job_dir.glob("*/result.json"))
         assert len(results) == 1
@@ -62,6 +86,18 @@ async def test_full_pipeline(tmp_path, monkeypatch):
         label = trial.name.lower().replace("_", "-")
         running = subprocess.check_output(["docker", "ps", "--format", "{{.Names}}"], text=True)
         assert label not in running
+        assert hook_trials == [trial.name]
+        assert prune_calls == [("builder", "prune", "--all", "--force")]
+        report = json.loads((trial / "docker-cleanup.json").read_text())
+        assert report["build_cache"]["exit_code"] == 0
+        assert "error" not in report
+        for image in json.loads((trial / "docker-images.json").read_text()):
+            assert (
+                subprocess.run(
+                    ["docker", "image", "inspect", image], capture_output=True
+                ).returncode
+                != 0
+            )
 
 
 @pytest.mark.asyncio

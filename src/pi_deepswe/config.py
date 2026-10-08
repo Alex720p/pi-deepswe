@@ -126,6 +126,13 @@ class RunConfig(BaseModel):
     tasks_dir: Path = Path("datasets/deep-swe/tasks")
     jobs_dir: Path = Path("jobs")
     concurrency: int = Field(default=1, ge=1)
+    prune_docker_cache: bool = False
+
+    @model_validator(mode="after")
+    def validate_cleanup(self) -> "RunConfig":
+        if self.prune_docker_cache and self.concurrency != 1:
+            raise ValueError("prune_docker_cache requires concurrency=1")
+        return self
 
 
 class Config(BaseModel):

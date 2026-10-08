@@ -4,15 +4,36 @@ import json
 from urllib.parse import urlsplit
 
 from pier.environments.agent_setup import EGRESS_PROXY_SERVICE
-from pier.environments.docker.docker import DockerEnvironment
+from pier.environments.docker.docker import (
+    DockerEnvironment,
+    _sanitize_docker_compose_project_name,
+)
 
 from pi_deepswe.config import endpoint_url
 
 
 class PiDockerEnvironment(DockerEnvironment):
-    def __init__(self, *args, model_base_url: str, **kwargs):
+    def __init__(self, *args, model_base_url: str, prune_docker_cache: bool = False, **kwargs):
         self.model_base_url = endpoint_url(model_base_url)
+        self.prune_docker_cache = prune_docker_cache
         super().__init__(*args, **kwargs)
+
+    async def start(self, force_build: bool):
+        if self.prune_docker_cache:
+            # Record before building, so END cleanup also handles failed starts.
+            # Pier's pinned Compose template uses project-service image tags.
+            project = _sanitize_docker_compose_project_name(self.session_id)
+            prebuilt = self.task_env_config.docker_image
+            images = {prebuilt} if prebuilt else set()
+            if force_build or not prebuilt or self.agent_install_spec is not None:
+                images.add(f"{project}-main:latest")
+            if self.network_allowlist.domains:
+                images.add(f"{project}-{EGRESS_PROXY_SERVICE}:latest")
+            path = self.trial_paths.trial_dir / "docker-images.json"
+            recorded = set(json.loads(path.read_text())) if path.exists() else set()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(sorted(recorded | images), indent=2) + "\n")
+        await super().start(force_build=force_build)
 
     def _prepare_egress_proxy_compose(self) -> None:
         # Verifiers are created without an agent install or network allowlist.

@@ -63,8 +63,8 @@ Start with the default single task:
 .venv/bin/pi-deepswe run --config config.local.toml --task abs-module-cache-flags
 ```
 
-`check` validates configuration, Docker Compose, and host resources. Endpoint
-connectivity is checked through the actual inference proxy during trial setup;
+`check` validates configuration, Docker Compose, dependencies, and task
+compatibility. Endpoint connectivity is checked through the actual inference proxy during trial setup;
 `check` itself does not make an inference request.
 
 All paths in TOML resolve from your current working directory. Each run gets a
@@ -82,11 +82,8 @@ For a deterministic subset or the whole corpus:
 
 The subset shuffles sorted task-folder names using the provided seed. Record the
 selected task IDs with any results; this selection need not match Pier's native
-subset ordering. Run one task at a time on small hosts. The launcher requires the
-largest selected container's memory limit per concurrent trial plus 1 GiB host
-reserve, and at least 10 GiB free space on Docker's filesystem. Image sizes vary,
-so that disk minimum does not guarantee a particular image will fit. Limits are
-never reduced automatically. Images/build caches can accumulate over a full run.
+subset ordering. The benchmark's task limits are retained. Images/build caches
+can accumulate over a full run; automatic cleanup is available below.
 
 The stock configuration uses pi's default system prompt and four coding tools:
 `read`, `bash`, `edit`, and `write`. Skills, extensions, MCP, prompt templates,
@@ -106,7 +103,7 @@ commit. Ignored files are not added.
 Pier's native job and trial results remain the source of truth. Useful artifacts:
 
 - `pi-deepswe-provenance.json`: versions, benchmark revision, model settings, task
-  selection, run budgets, and host resource checks.
+  selection, run budgets, and Docker pruning settings.
 - `<trial>/agent/`: `events.jsonl`, native sessions, `stderr.txt`, ATIF
   `trajectory.json`, `submission.txt`, and adapter provenance.
 - `<trial>/artifacts/model.patch`: the submitted committed patch.
@@ -151,6 +148,26 @@ Normal test runs skip these Docker tests. Builds download Ubuntu/system packages
 Node, and the locked npm packages.
 
 ## Cleanup
+
+For a sequential full-suite run with automatic Docker cleanup:
+
+```sh
+.venv/bin/pi-deepswe run --config config.local.toml --all --prune-docker-cache
+```
+
+Alternatively set `prune_docker_cache = true` under `[run]`. This option requires
+`concurrency = 1`. After each trial finishes grading and saves its results, cleanup
+removes that trial's unused agent/proxy/verifier images and its task base-image
+tag, then runs `docker builder prune --all --force`. It skips images referenced
+by existing containers and never forces image removal. Other projects' image
+tags and volumes are preserved, but unused build cache is pruned across the
+selected Docker builder, so other builds may need to rebuild cached layers.
+Only images recorded by the current trial are considered; older trial images
+are not swept. Downloads/builds can therefore repeat for related tasks. Saved
+results, patches, and logs remain under `jobs/`, including a per-trial
+`docker-cleanup.json` report. Cleanup errors are logged without changing scores.
+This limits accumulation between tasks, but a large individual task still needs
+enough disk space to build and run. The default keeps caching enabled.
 
 Pier stops trial containers and networks after completion, keeping logs and the
 image layers needed for repeat runs. If a process is forcibly killed, use the

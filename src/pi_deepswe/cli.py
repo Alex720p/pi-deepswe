@@ -6,7 +6,6 @@ import importlib.metadata
 import json
 import os
 import random
-import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -19,7 +18,8 @@ from pier.models.task.verifier_mode import resolve_effective_verifier_env_config
 from pier.models.trial.config import AgentConfig, EnvironmentConfig, TaskConfig
 
 from pi_deepswe import __version__
-from pi_deepswe.config import Config
+from pi_deepswe.cleanup import prune_trial_docker_cache
+from pi_deepswe.config import Config, RunConfig
 from pi_deepswe.environment import PiDockerEnvironment
 from pi_deepswe.pins import DEEPSWE_COMMIT, NODE_VERSION, PI_VERSION, PIER_VERSION
 
@@ -76,7 +76,7 @@ def select_tasks(root: Path, *, task: str | None, n_tasks: int | None, seed: int
     return paths
 
 
-def check_resources(config: Config, task_paths: list[Path]) -> dict:
+def check_prerequisites(config: Config, task_paths: list[Path]) -> None:
     PiDockerEnvironment.preflight()
     subprocess.run(["docker", "compose", "version"], check=True, capture_output=True)
     if importlib.metadata.version("datacurve-pier") != PIER_VERSION:
@@ -86,7 +86,6 @@ def check_resources(config: Config, task_paths: list[Path]) -> dict:
             f"Set {config.model.api_key_env}, or omit api_key_env for an unauthenticated server"
         )
     tasks = [Task(path) for path in task_paths]
-    peak_mb = 0
     for task in tasks:
         if task.config.environment.os.value != "linux" or task.has_steps:
             raise ValueError("This adapter currently supports single-step Linux tasks")
@@ -97,38 +96,6 @@ def check_resources(config: Config, task_paths: list[Path]) -> dict:
         verifier_env = resolve_effective_verifier_env_config(task.config, None)
         if verifier_env is None or verifier_env.allow_internet:
             raise ValueError(f"Task {task.name} must use a separate no-network verifier")
-        envs = [task.config.environment, verifier_env]
-        peak_mb = max(peak_mb, *(env.memory_mb for env in envs))
-    mem = {}
-    for line in Path("/proc/meminfo").read_text().split("\n"):
-        fields = line.split()
-        if len(fields) >= 2:
-            mem[fields[0].rstrip(":")] = int(fields[1]) // 1024
-    available_mb = mem.get("MemAvailable", 0)
-    needed_mb = config.run.concurrency * peak_mb + 1024
-    if available_mb < needed_mb:
-        raise ValueError(
-            f"Need {needed_mb} MiB available RAM; found {available_mb} MiB. "
-            "Free host memory or reduce concurrency; task limits are unchanged."
-        )
-    docker_root = subprocess.check_output(
-        ["docker", "info", "--format", "{{.DockerRootDir}}"],
-        text=True,
-    ).strip()
-    disk_root = Path(docker_root) if Path(docker_root).is_dir() else Path.cwd()
-    free_gib = shutil.disk_usage(disk_root).free / 1024**3
-    if free_gib < 10:
-        raise ValueError(
-            f"Only {free_gib:.1f} GiB free at {disk_root}; "
-            "free at least 10 GiB before pulling images"
-        )
-    return {
-        "available_memory_mb": available_mb,
-        "required_memory_mb": needed_mb,
-        "docker_disk_free_gib": round(free_gib, 2),
-        "docker_root": docker_root,
-        "note": "Image and build sizes vary; disk check is a minimum, not a size guarantee.",
-    }
 
 
 def build_job_config(config: Config, paths: list[Path], job_name: str) -> JobConfig:
@@ -150,7 +117,10 @@ def build_job_config(config: Config, paths: list[Path], job_name: str) -> JobCon
         ],
         environment=EnvironmentConfig(
             import_path="pi_deepswe.environment:PiDockerEnvironment",
-            kwargs={"model_base_url": model.effective_url},
+            kwargs={
+                "model_base_url": model.effective_url,
+                "prune_docker_cache": config.run.prune_docker_cache,
+            },
         ),
         tasks=[TaskConfig(path=p) for p in paths],
     )
@@ -190,12 +160,14 @@ def summarize(job_dir: Path) -> dict:
     }
 
 
-async def launch(config: Config, paths: list[Path], resources: dict) -> int:
+async def launch(config: Config, paths: list[Path]) -> int:
     # Import lazily: --help/config inspection do not load optional agent providers.
     from pier.job import Job
 
     job_name = datetime.now(UTC).strftime("pi-%Y%m%d-%H%M%S-") + uuid4().hex[:6]
     job = await Job.create(build_job_config(config, paths, job_name))
+    if config.run.prune_docker_cache:
+        job.on_trial_ended(prune_trial_docker_cache)
     revision = dataset_revision(config.run.tasks_dir)
     (job.job_dir / "pi-deepswe-provenance.json").write_text(
         json.dumps(
@@ -209,9 +181,9 @@ async def launch(config: Config, paths: list[Path], resources: dict) -> int:
                 "model": config.model.model_dump(mode="json"),
                 "effective_base_url": config.model.effective_url,
                 "tasks": [p.name for p in paths],
-                "resources": resources,
                 "attempts": 1,
                 "concurrency": config.run.concurrency,
+                "prune_docker_cache": config.run.prune_docker_cache,
                 "whole_trial_retries": 0,
                 "budgets": "task defaults",
                 "label": "pi + model on DeepSWE",
@@ -233,7 +205,7 @@ def parser() -> argparse.ArgumentParser:
     fetch.add_argument("--destination", type=Path, default=Path("datasets/deep-swe"))
     for name in ("run", "check"):
         command = commands.add_parser(
-            name, help="Run tasks" if name == "run" else "Check configuration and host resources"
+            name, help="Run tasks" if name == "run" else "Check configuration and prerequisites"
         )
         command.add_argument("--config", type=Path, required=True)
         selection = command.add_mutually_exclusive_group()
@@ -241,6 +213,12 @@ def parser() -> argparse.ArgumentParser:
         selection.add_argument("--n-tasks", type=int, help="Deterministic random subset")
         selection.add_argument("--all", action="store_true", help="Run the full corpus")
         command.add_argument("--seed", type=int, default=0)
+        command.add_argument(
+            "--prune-docker-cache",
+            action="store_true",
+            help="After each trial remove its unused images and prune builder-wide unused cache; "
+            "requires concurrency=1",
+        )
     summary = commands.add_parser("summary", help="Inspect saved verifier rewards and errors")
     summary.add_argument("job_dir", type=Path)
     return result
@@ -256,29 +234,33 @@ def main() -> None:
             print(json.dumps(summarize(args.job_dir), indent=2))
             return
         config = Config.load(args.config)
+        if args.prune_docker_cache:
+            config.run = RunConfig.model_validate(
+                {**config.run.model_dump(), "prune_docker_cache": True}
+            )
         task = args.task
         if task is None and args.n_tasks is None and not args.all:
             task = "abs-module-cache-flags"
         paths = select_tasks(config.run.tasks_dir, task=task, n_tasks=args.n_tasks, seed=args.seed)
-        resources = check_resources(config, paths)
+        check_prerequisites(config, paths)
         print(
             json.dumps(
                 {
                     "tasks": [p.name for p in paths],
                     "model": config.model.identity,
                     "endpoint": config.model.effective_url,
-                    "resources": resources,
+                    "prune_docker_cache": config.run.prune_docker_cache,
                 },
                 indent=2,
             )
         )
         if args.command == "check":
             print(
-                "Host/configuration checks passed. "
+                "Configuration/prerequisite checks passed. "
                 "Endpoint reachability is checked inside each trial."
             )
         else:
-            sys.exit(asyncio.run(launch(config, paths, resources)))
+            sys.exit(asyncio.run(launch(config, paths)))
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         print(f"pi-deepswe: {exc}", file=sys.stderr)
         sys.exit(2)

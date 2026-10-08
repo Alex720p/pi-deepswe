@@ -1,11 +1,14 @@
 import json
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic import ValidationError
 
-from pi_deepswe.cli import build_job_config, check_resources, select_tasks
-from pi_deepswe.config import Config, ModelConfig, endpoint_url
+from pi_deepswe.cli import build_job_config, check_prerequisites, select_tasks
+from pi_deepswe.config import Config, ModelConfig, RunConfig, endpoint_url
 
 
 @pytest.mark.parametrize(
@@ -79,15 +82,92 @@ def test_subset_is_deterministic_and_traversal_rejected(tmp_path):
         select_tasks(tmp_path, task="../outside", n_tasks=None, seed=0)
 
 
-def test_fixture_resource_check(monkeypatch):
+@pytest.fixture
+def prerequisite_mocks(monkeypatch):
+    import pi_deepswe.cli as cli
+
+    monkeypatch.setattr(cli.PiDockerEnvironment, "preflight", lambda: None)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *_args, **_kwargs: None)
+
+    def fail_resource_probe(*_args, **_kwargs):
+        pytest.fail("Host memory and disk space must not be inspected")
+
+    original_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == Path("/proc/meminfo"):
+            fail_resource_probe()
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(shutil, "disk_usage", fail_resource_probe)
+    monkeypatch.setattr(cli.subprocess, "check_output", fail_resource_probe)
+
+
+def test_fixture_prerequisites_without_host_resource_probes(prerequisite_mocks):
+    from .test_docker import FIXTURE
+
+    config = Config(model=ModelConfig(base_url="http://localhost:8000/v1", model_id="test"))
+    assert check_prerequisites(config, [FIXTURE]) is None
+
+
+def test_prerequisites_still_require_api_key(prerequisite_mocks, monkeypatch):
+    from .test_docker import FIXTURE
+
+    monkeypatch.delenv("TEST_MODEL_API_KEY", raising=False)
+    config = Config(
+        model=ModelConfig(
+            base_url="http://localhost:8000/v1", model_id="test", api_key_env="TEST_MODEL_API_KEY"
+        )
+    )
+    with pytest.raises(ValueError, match="Set TEST_MODEL_API_KEY"):
+        check_prerequisites(config, [FIXTURE])
+
+
+def test_check_output_omits_host_resources(prerequisite_mocks, monkeypatch, capsys):
     import pi_deepswe.cli as cli
 
     from .test_docker import FIXTURE
 
-    monkeypatch.setattr(cli.PiDockerEnvironment, "preflight", lambda: None)
-    monkeypatch.setattr(cli.subprocess, "run", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(cli.subprocess, "check_output", lambda *_args, **_kwargs: "/tmp")
-    config = Config(model=ModelConfig(base_url="http://localhost:8000/v1", model_id="test"))
-    result = check_resources(config, [FIXTURE])
-    assert result["required_memory_mb"] == 2048
-    assert json.dumps(result)
+    config = Config(
+        model=ModelConfig(base_url="http://localhost:8000/v1", model_id="test"),
+        run=RunConfig(tasks_dir=FIXTURE.parent),
+    )
+    monkeypatch.setattr(cli.Config, "load", lambda _path: config)
+    monkeypatch.setattr(
+        cli.sys, "argv", ["pi-deepswe", "check", "--config", "unused.toml", "--task", FIXTURE.name]
+    )
+    cli.main()
+    output = capsys.readouterr().out
+    values, _ = json.JSONDecoder().raw_decode(output)
+    assert "resources" not in values
+    assert values["tasks"] == [FIXTURE.name]
+    assert "Configuration/prerequisite checks passed." in output
+
+
+@pytest.mark.asyncio
+async def test_provenance_omits_resources_preserves_pruning(tmp_path, monkeypatch):
+    from pier.job import Job
+
+    import pi_deepswe.cli as cli
+
+    from .test_docker import FIXTURE
+
+    job = SimpleNamespace(job_dir=tmp_path, run=AsyncMock(), on_trial_ended=Mock())
+    create_job = AsyncMock(return_value=job)
+    monkeypatch.setattr(Job, "create", create_job)
+    monkeypatch.setattr(cli, "dataset_revision", lambda _path: "fixture-revision")
+    monkeypatch.setattr(
+        cli, "summarize", lambda _path: {"infrastructure_errors": 0, "verified_trials": 1}
+    )
+    config = Config(
+        model=ModelConfig(base_url="http://localhost:8000/v1", model_id="test"),
+        run=RunConfig(prune_docker_cache=True),
+    )
+    assert await cli.launch(config, [FIXTURE]) == 0
+    provenance = json.loads((tmp_path / "pi-deepswe-provenance.json").read_text())
+    assert "resources" not in provenance
+    assert provenance["prune_docker_cache"] is True
+    assert provenance["budgets"] == "task defaults"
+    job.on_trial_ended.assert_called_once_with(cli.prune_trial_docker_cache)
+    job.run.assert_awaited_once()
