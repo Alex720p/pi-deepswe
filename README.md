@@ -4,9 +4,6 @@ Run stock [pi](https://github.com/earendil-works/pi) on the official
 [DeepSWE](https://github.com/datacurve-ai/deep-swe) tasks, using
 [Pier](https://github.com/datacurve-ai/pier) for Docker execution and grading.
 
-See [the VPS guide](guide.md) for full-suite execution, VPN interruptions,
-Docker cleanup, and resuming unfinished tasks.
-
 Each attempt runs pi inside the task container. The adapter commits pi's changes,
 Pier collects the resulting patch, stops the agent container, and grades it in a
 fresh container without network access. Held-out tests and reference solutions
@@ -87,30 +84,6 @@ The subset shuffles sorted task-folder names using the provided seed. Record the
 selected task IDs with any results; this selection need not match Pier's native
 subset ordering. The benchmark's task limits are retained. Images/build caches
 can accumulate over a full run; automatic cleanup is available below.
-
-### VPN interruptions and resuming
-
-The agent checks inference connectivity through its Docker proxy every 30 seconds.
-Three consecutive failed probes stop the active agent, save its partial patch and
-logs, and allow offline grading to finish. A failed endpoint preflight or a
-terminal model API error also stops the job before further tasks run. Recoverable
-API retries stay within pi. A VPN-related stop exits with code 75 and prints the
-job path and resume command. For VPN-limited runs, keep `concurrency = 1`.
-
-After reconnecting the VPN, export the model API key again and resume:
-
-```sh
-.venv/bin/pi-deepswe resume jobs/<job-name>
-```
-
-Resume uses the saved task selection, model configuration, budgets, and Docker
-pruning setting. It retains completed scored attempts, including zero scores and
-graded agent timeouts. Interrupted attempts and infrastructure failures restart
-from scratch; their earlier logs and patches are moved into the job's `.interrupted/`
-directory. Unstarted tasks run normally. Resumption continues the same job and
-keeps its original provenance. Use the same workspace/task paths and do not run
-two launchers against the same job. `run-state.json` records whether a run paused,
-stopped, or finished. Ordinary SSH disconnects can be handled by running in `tmux`.
 
 The stock configuration uses pi's default system prompt and four coding tools:
 `read`, `bash`, `edit`, and `write`. Skills, extensions, MCP, prompt templates,
