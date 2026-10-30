@@ -4,6 +4,9 @@ Run stock [pi](https://github.com/earendil-works/pi) on the official
 [DeepSWE](https://github.com/datacurve-ai/deep-swe) tasks, using
 [Pier](https://github.com/datacurve-ai/pier) for Docker execution and grading.
 
+See [the VPS guide](guide.md) for full-suite execution, VPN interruptions,
+Docker cleanup, and resuming unfinished tasks.
+
 Each attempt runs pi inside the task container. The adapter commits pi's changes,
 Pier collects the resulting patch, stops the agent container, and grades it in a
 fresh container without network access. Held-out tests and reference solutions
